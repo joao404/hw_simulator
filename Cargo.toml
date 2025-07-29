@@ -1,7 +1,8 @@
 [package]
 edition = "2021"
-name = "nucleo_board"
+name = "hw_simulator"
 version = "0.1.0"
+authors = ["Marcel Maage <marcel@maage.online>"]
 license = "MIT OR Apache-2.0"
 
 [dependencies]
@@ -17,9 +18,12 @@ embassy-futures = { version = "0.1.0"}
 
 stm32-metapac = "*"
 
-picoserve = {version = "0.16.0", features = ["embassy"]}
+picoserve = { version = "0.16.0", features = ["embassy"]}
 
 byteorder = { version = "1.0", default-features = false }
+
+emballoc = "0.3.0"
+roxmltree = { version = "0.20.0", default-features = false }
 
 defmt = "0.3"
 defmt-rtt = "0.4"

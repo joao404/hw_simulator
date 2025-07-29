@@ -6,20 +6,21 @@ use core::mem::MaybeUninit;
 
 use defmt::*;
 use embassy_executor::Spawner;
-use embassy_stm32::gpio::{Level, Output, Speed};
-use embassy_stm32::SharedData;
-use embassy_time::{Timer, Duration};
+use embassy_net::tcp::TcpSocket;
 use embassy_net::udp::{PacketMetadata, UdpSocket};
-use embassy_net::{Ipv4Address, StackResources, Ipv4Cidr};
-//use embassy_net::tcp::TcpSocket;
-use embassy_stm32::eth::{Ethernet, PacketQueue};
+use embassy_net::{Ipv4Address, Ipv4Cidr, StackResources};
 use embassy_stm32::eth::generic_smi::GenericSMI;
+use embassy_stm32::eth::{Ethernet, PacketQueue};
+use embassy_stm32::gpio::{Level, Output, Speed};
 use embassy_stm32::peripherals::ETH;
 use embassy_stm32::rng::Rng;
+use embassy_stm32::SharedData;
 use embassy_stm32::{bind_interrupts, eth, peripherals, rng};
+use embassy_time::{Duration, Timer};
+use embedded_io_async::Write;
+use heapless::Vec;
 use rand_core::RngCore;
 use static_cell::StaticCell;
-use heapless::Vec;
 use {defmt_rtt as _, panic_probe as _};
 
 use picoserve::{make_static, routing::get, AppBuilder, AppRouter};
@@ -28,6 +29,11 @@ use stm32_metapac::ETH as ETH_pac;
 
 #[unsafe(link_section = ".ram_d3.shared_data")]
 static SHARED_DATA: MaybeUninit<SharedData> = MaybeUninit::uninit();
+
+#[global_allocator]
+static ALLOCATOR: emballoc::Allocator<4096> = emballoc::Allocator::new();
+
+extern crate alloc;
 
 bind_interrupts!(struct Irqs {
     ETH => eth::InterruptHandler;
@@ -43,8 +49,6 @@ async fn net_task(mut runner: embassy_net::Runner<'static, Device>) -> ! {
 
 #[embassy_executor::task]
 async fn blink(mut led: Output<'static>, interval_ms: u64) {
-    //let mut led = Output::new(pin, Level::High, Speed::Low);
-
     loop {
         led.set_high();
         Timer::after_millis(interval_ms).await;
@@ -62,16 +66,27 @@ async fn udp_handler(stack: embassy_net::Stack<'static>) {
     let mut tx_meta = [PacketMetadata::EMPTY; 16];
     let mut buf = [0; 1024];
 
-        let mut socket = UdpSocket::new(stack, &mut rx_meta, &mut rx_buffer, &mut tx_meta, &mut tx_buffer);
-        socket.bind(embassy_net::IpListenEndpoint{addr: Some(embassy_net::IpAddress::v4(192, 168, 178, 30)), port: 3005}).unwrap();
+    let mut socket = UdpSocket::new(
+        stack,
+        &mut rx_meta,
+        &mut rx_buffer,
+        &mut tx_meta,
+        &mut tx_buffer,
+    );
+    socket
+        .bind(embassy_net::IpListenEndpoint {
+            addr: Some(embassy_net::IpAddress::v4(192, 168, 178, 30)),
+            port: 3005,
+        })
+        .unwrap();
 
-        loop {
-            let (n, ep) = socket.recv_from(&mut buf).await.unwrap();
-            //if Some(embassy_net::IpAddress::v4(192, 168, 178, 30)) == ep.local_address
-            //{
-            if let Ok(s) = core::str::from_utf8(&buf[..n]) {
-                info!("rxd from {}: {}", ep, s);
-            }
+    loop {
+        let (n, ep) = socket.recv_from(&mut buf).await.unwrap();
+        //if Some(embassy_net::IpAddress::v4(192, 168, 178, 30)) == ep.local_address
+        //{
+        if let Ok(s) = core::str::from_utf8(&buf[..n]) {
+            info!("rxd from {}: {}", ep, s);
+        }
         //}
     }
 }
@@ -177,18 +192,22 @@ async fn main(spawner: Spawner) {
         dns_servers: Vec::new(),
         gateway: Some(Ipv4Address::new(192, 168, 178, 1)),
     });
-    
+
     // Init network stack
     static RESOURCES: StaticCell<StackResources<8>> = StaticCell::new();
-    let (mut stack, runner) = embassy_net::new(device, config, RESOURCES.init(StackResources::new()), seed);
+    let (mut stack, runner) =
+        embassy_net::new(device, config, RESOURCES.init(StackResources::new()), seed);
 
     // Launch network task
     unwrap!(spawner.spawn(net_task(runner)));
 
     // Ensure DHCP configuration is up before trying connect
     //stack.wait_config_up().await;
-    stack.update_ip_addrs_listen(|storage|{
-        let _ = storage.push(embassy_net::IpCidr::Ipv4(Ipv4Cidr::new(Ipv4Address::new(192, 168, 178, 30), 24)));
+    stack.update_ip_addrs_listen(|storage| {
+        let _ = storage.push(embassy_net::IpCidr::Ipv4(Ipv4Cidr::new(
+            Ipv4Address::new(192, 168, 178, 30),
+            24,
+        )));
     });
 
     info!("Network task initialized");
@@ -215,26 +234,27 @@ async fn main(spawner: Spawner) {
         spawner.must_spawn(web_task(id, stack, app, config));
     }
 
+    let mut rx_buffer = [0; 1024];
+    let mut tx_buffer = [0; 1024];
+    let mut buf = [0; 1024];
+
     loop {
-        Timer::after_millis(1000).await;
-    }
-}
+        let mut tcp_cmd_socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
 
-/*
-loop {
-        let mut tcp_socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
-
-        tcp_socket.set_timeout(Some(Duration::from_secs(10)));
+        tcp_cmd_socket.set_timeout(Some(Duration::from_secs(10)));
 
         info!("Listening on TCP:80...");
-        if let Err(e) = tcp_socket.accept(80).await {
+        if let Err(e) = tcp_cmd_socket.accept(13181).await {
             warn!("accept error: {:?}", e);
             continue;
         }
-        info!("Received connection from {:?}", tcp_socket.remote_endpoint());
+        info!(
+            "Received connection from {:?}",
+            tcp_cmd_socket.remote_endpoint()
+        );
 
         loop {
-            let n = match tcp_socket.read(&mut buf).await {
+            let n = match tcp_cmd_socket.read(&mut buf).await {
                 Ok(0) => {
                     warn!("read EOF");
                     break;
@@ -245,22 +265,35 @@ loop {
                     break;
                 }
             };
-            info!("rxd {}", core::str::from_utf8(&buf[..n]).unwrap());
+            let request_str = core::str::from_utf8(&buf[..n]).unwrap();
+            info!("rxd {}", request_str);
 
-            let answer = 
-            "HTTP/1.1 200 OK\nContent-Type: text/html\nConnection: close\n<!DOCTYPE HTML>\n<html>\n<head>\n</head>\n<p>\nHello World!\n</p></html>\n";
+            let mut answer = "<SimDone result=\"error\" detail=\"syntax\"/>";
 
-            if let Err(e) = tcp_socket.write_all(&answer.as_bytes()).await {
+            if let Ok(request) = roxmltree::Document::parse(request_str) {
+                if let Some(node) = request.descendants().find(|n| n.has_tag_name("SimCmd")) {
+                    if node.attribute("cmd") == Some("set") {
+                        if let Some(pin) = node.attribute("pin") {
+                            if let Some(value) = node.attribute("value") {
+                                info!("SimCmd set pin {} value {}", pin, value);
+                                answer = "<SimDone result=\"ok\" detail=\"\"/>";
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Err(e) = tcp_cmd_socket.write_all(&answer.as_bytes()).await {
                 warn!("write error: {:?}", e);
                 break;
             }
         }
-
-*/
+    }
+}
 
 /*
 <link rel=\"icon\" href=\"data:,\">\n
-└─ smoltcp::socket::tcp::{impl#9}::process @ smoltcp-0.12.0/src/macros.rs:17  
+└─ smoltcp::socket::tcp::{impl#9}::process @ smoltcp-0.12.0/src/macros.rs:17
 170.487426 INFO  rxd GET / HTTP/1.1
 Host: 192.168.178.61
 User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:141.0) Gecko/20100101 Firefox/141.0
@@ -274,21 +307,20 @@ Upgrade-Insecure-Requests: 1
 Priority: u=0, i
 */
 
-    /*
-    loop {
-        let mut socket = UdpSocket::new(stack, &mut rx_meta, &mut rx_buffer, &mut tx_meta, &mut tx_buffer);
-        socket.bind(3005).unwrap();
+/*
+loop {
+    let mut socket = UdpSocket::new(stack, &mut rx_meta, &mut rx_buffer, &mut tx_meta, &mut tx_buffer);
+    socket.bind(3005).unwrap();
 
-        loop {
-            let (n, ep) = socket.recv_from(&mut buf).await.unwrap();
-            if Some(embassy_net::IpAddress::v4(192, 168, 178, 30)) == ep.local_address
-            {
-            if let Ok(s) = core::str::from_utf8(&buf[..n]) {
-                info!("rxd from {}: {}", ep, s);
-            }
-        }
-            //socket.send_to(&buf[..n], ep).await.unwrap();
+    loop {
+        let (n, ep) = socket.recv_from(&mut buf).await.unwrap();
+        if Some(embassy_net::IpAddress::v4(192, 168, 178, 30)) == ep.local_address
+        {
+        if let Ok(s) = core::str::from_utf8(&buf[..n]) {
+            info!("rxd from {}: {}", ep, s);
         }
     }
-    */
-
+        //socket.send_to(&buf[..n], ep).await.unwrap();
+    }
+}
+*/
