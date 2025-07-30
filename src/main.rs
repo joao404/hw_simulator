@@ -25,6 +25,10 @@ use {defmt_rtt as _, panic_probe as _};
 
 use picoserve::{make_static, routing::get, AppBuilder, AppRouter};
 
+//use gray_codes::GrayCode32;
+
+use zerocopy::{IntoBytes, FromBytes, Immutable};
+
 use stm32_metapac::ETH as ETH_pac;
 
 #[unsafe(link_section = ".ram_d3.shared_data")]
@@ -57,6 +61,27 @@ async fn blink(mut led: Output<'static>, interval_ms: u64) {
     }
 }
 
+#[derive(IntoBytes, FromBytes, Immutable)]
+#[repr(C, packed)]
+struct ProcessImageRx
+{
+    cmd_count : u32,
+    cmd : u32,
+    position : u32,
+    //reserved : [u8;8],
+}
+
+const PROCESS_IMAGE_RX_SIZE : usize = core::mem::size_of::<ProcessImageRx>();
+
+impl ProcessImageRx{
+    pub fn as_slice(&self) -> &[u8;PROCESS_IMAGE_RX_SIZE]{
+        zerocopy::transmute_ref!(self)
+    }
+    pub fn as_mut_slice(&mut self) -> &mut [u8;PROCESS_IMAGE_RX_SIZE] {
+        zerocopy::transmute_mut!(self)
+    }
+}
+
 #[embassy_executor::task]
 async fn udp_handler(stack: embassy_net::Stack<'static>) {
     // Then we can use it!
@@ -66,26 +91,36 @@ async fn udp_handler(stack: embassy_net::Stack<'static>) {
     let mut tx_meta = [PacketMetadata::EMPTY; 16];
     let mut buf = [0; 1024];
 
-    let mut socket = UdpSocket::new(
+    let mut udp_socket = UdpSocket::new(
         stack,
         &mut rx_meta,
         &mut rx_buffer,
         &mut tx_meta,
         &mut tx_buffer,
     );
-    socket
+    udp_socket
         .bind(embassy_net::IpListenEndpoint {
             addr: Some(embassy_net::IpAddress::v4(192, 168, 178, 30)),
             port: 3005,
         })
         .unwrap();
 
+    let mut image = ProcessImageRx{
+        cmd_count:0,
+        cmd: 1,
+        position : 1000,};
+
+
     loop {
-        let (n, ep) = socket.recv_from(&mut buf).await.unwrap();
+        let (n, ep) = udp_socket.recv_from(image.as_mut_slice()).await.unwrap();
         //if Some(embassy_net::IpAddress::v4(192, 168, 178, 30)) == ep.local_address
         //{
+        //let pos:u32=256;
+        //let _gray = GrayCode32::from_index(pos);
+
         if let Ok(s) = core::str::from_utf8(&buf[..n]) {
             info!("rxd from {}: {}", ep, s);
+
         }
         //}
     }
@@ -101,7 +136,7 @@ impl AppBuilder for AppProps {
     }
 }
 
-const WEB_TASK_POOL_SIZE: usize = 4;
+const WEB_TASK_POOL_SIZE: usize = 2;
 
 #[embassy_executor::task(pool_size = WEB_TASK_POOL_SIZE)]
 async fn web_task(

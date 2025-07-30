@@ -22,8 +22,16 @@ picoserve = { version = "0.16.0", features = ["embassy"]}
 
 byteorder = { version = "1.0", default-features = false }
 
+# handling process image
+zerocopy = {version = "0.8.26", features = ["derive"]}
+
+# reading tcp commands
 emballoc = "0.3.0"
 roxmltree = { version = "0.20.0", default-features = false }
+
+
+# SSI signal generation
+#gray-codes = "0.1.1"
 
 defmt = "0.3"
 defmt-rtt = "0.4"
